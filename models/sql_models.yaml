@@ -1,0 +1,78 @@
+models:
+  #  #SQL Model(s) for pb_project.yaml
+  #  - name: email_exclusions
+  #    model_type: sql_template
+  #    model_spec:
+  #      validity_time: 24h # 1 day
+  #      occurred_at_col: timestamp
+  #      materialization:
+  #        output_type: ephemeral
+  #        run_type: discrete
+  #      single_sql: "Select other_id from rudderstack.id_exclusions where other_id_type = 'email'" #Sample table which can include any type of exclusion
+  # Commented out sql models for email exclusions. Kept here for reference.
+  #  - name: anonymous_id_exclusions
+  #    model_type: sql_template
+  #    model_spec:
+  #      validity_time: 24h # 1 day
+  #      occurred_at_col: timestamp
+  #      materialization:
+  #        output_type: ephemeral
+  #        run_type: discrete
+  #      single_sql: "select distinct anonymous_id from marketing_website.tracks where context_violation_errors is not null" #Exclude anonymous IDs from the marketing site for folks that had errors
+  #      #SQL Model(s) for used in entity_vars
+  #      # 4/22/2024 Drew removed the db in the from clause above
+  - name: rsTracksUnionPages
+    model_type: sql_template
+    model_spec:
+      validity_time: 24h # 1 day
+      occurred_at_col: timestamp
+      materialization:
+        output_type: ephemeral
+        run_type: discrete
+      single_sql: |
+        {% with Tracks = this.DeRef("inputs/rsMarketingTracks") Pages = this.DeRef("inputs/rsMarketingPages") %}
+            select user_id, anonymous_id, context_session_id, timestamp from (
+            select ANONYMOUS_ID,USER_ID,timestamp::date as dt, DATE_PART(epoch_second, timestamp::date) as CONTEXT_SESSION_ID,min(timestamp) as timestamp from {{Tracks}} group by user_id, anonymous_id, context_session_id, timestamp::date
+            union all
+            select ANONYMOUS_ID,USER_ID,timestamp::date as dt, DATE_PART(epoch_second, timestamp::date) as CONTEXT_SESSION_ID,max(timestamp) as timestamp from {{Tracks}} group by user_id, anonymous_id, context_session_id, timestamp::date) a
+            union all
+            select user_id, anonymous_id, context_session_id, timestamp from
+            (select ANONYMOUS_ID, null::text as USER_ID,timestamp::date as dt, DATE_PART(epoch_second, timestamp::date) as  CONTEXT_SESSION_ID,min(timestamp) as timestamp from {{Pages}} group by user_id, anonymous_id, context_session_id, timestamp::date
+            union all
+            select ANONYMOUS_ID, null::text as user_id,timestamp::date as dt, DATE_PART(epoch_second, timestamp::date) as CONTEXT_SESSION_ID,max(timestamp) as timestamp from {{Pages}} group by user_id, anonymous_id, context_session_id, timestamp::date)
+        {% endwith %}
+      ids:
+        - select: "user_id"
+          type: user_id
+          entity: user
+        - select: "anonymous_id"
+          type: anonymous_id
+          entity: user
+  - name: sqlSubscriptionDetails
+    model_type: sql_template
+    model_spec:
+      validity_time: 24h # 1 day
+      occurred_at_col: INVOICE_DATE
+      materialization:
+        output_type: ephemeral
+        run_type: discrete
+      single_sql: |
+        {% with SubStarts = this.DeRef("inputs/rsSubServiceStart") subRenewals = this.DeRef("inputs/rsSubServiceRenewal") subUpgrades = this.DeRef("inputs/rsSubServiceUpgrade") %}
+
+        Select ANONYMOUS_ID,DEVICE_ID,EVENT,EVENT_TEXT,INVOICE_AMOUNT,INVOICE_DATE, SHOPIFY_CUSTOMER_ID, SUBSCRIPTION_TYPE from {{SubStarts}}
+        UNION ALL
+        Select ANONYMOUS_ID,DEVICE_ID,EVENT,EVENT_TEXT,INVOICE_AMOUNT,INVOICE_DATE, SHOPIFY_CUSTOMER_ID, SUBSCRIPTION_TYPE from {{subRenewals}}
+        UNION ALL
+        Select ANONYMOUS_ID,DEVICE_ID,EVENT,EVENT_TEXT,INVOICE_AMOUNT,INVOICE_DATE, SHOPIFY_CUSTOMER_ID, SUBSCRIPTION_TYPE from  {{subUpgrades}}
+
+        {% endwith %}
+      ids:
+        - select: ANONYMOUS_ID
+          type: anonymous_id
+          entity: user
+        - select: SHOPIFY_CUSTOMER_ID
+          type: shopify_customer_id
+          entity: user
+        - select: DEVICE_ID
+          type: device_id
+          entity: user

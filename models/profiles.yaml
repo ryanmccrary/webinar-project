@@ -1,0 +1,252 @@
+models:
+  #ID Stitching Model(s)
+  - name: customer_id_graph
+    model_type: id_stitcher
+    model_spec:
+      validity_time: 24h # 1 day
+      entity_key: user
+      materialization:
+        run_type: incremental
+      edge_sources:
+        - from: inputs/rsAndroidAccountCreated
+        - from: inputs/rsSubServiceStart
+        - from: inputs/rsIOSAccountCreated
+        - from: inputs/rsMarketingIdentifies
+        - from: inputs/rsShopifyOrderCompleted
+        - from: inputs/rsAndroidAccountUpdated
+        - from: inputs/rsIOSAccountUpdated
+          # Customer 360 Model(s)
+  - name: customer_profile
+    model_type: feature_table_model
+    model_spec:
+      validity_time: 24h # 1 day
+      entity_key: user
+      features:
+        - user_email
+        - account_first_name
+        - account_last_name
+        - account_type
+        - account_signup_date
+        - install_type
+        - device_count
+        - device_count_with_active_subscriptions
+        - total_sessions_to_date
+        - last_order_date
+        - is_churned_7_days
+        - account_username
+        - subscription_propensity
+        - live_view_count
+        - subscription_type
+        - subscription_change_count
+        # Defining Cohort(s)
+  - name: commercial_customers
+    model_type: entity_cohort
+    model_spec:
+      extends: user/all
+      time_grain: "day"
+      materialization:
+        output_type: table
+      filter_pipeline:
+        - type: include #important to note this filter
+          value: "{{user.Var(\"account_type\")}} = 'Commercial'"
+  - name: commercial_customer_profiles
+    model_type: feature_table_model
+    model_spec:
+      validity_time: 24h # 1 day
+      entity_cohort: models/commercial_customers
+      features:
+        - customer_device_count
+        - customer_signup_date
+  - name: residential_customers
+    model_type: entity_cohort
+    model_spec:
+      extends: user/all
+      time_grain: "day"
+      materialization:
+        output_type: table
+      filter_pipeline:
+        - type: include #important to note this filter
+          value: "{{user.Var(\"account_type\")}} = 'Residential'"
+  - name: residential_customer_profiles
+    model_type: feature_table_model
+    model_spec:
+      validity_time: 24h # 1 day
+      entity_cohort: models/residential_customers
+      features:
+        - customer_pet_count
+        - last_alert_date
+# Defining vars
+var_groups:
+  - name: user_vars
+    entity_key: user
+    vars:
+      - entity_var:
+          name: total_sessions_to_date
+          from: models/rsTracksUnionPages
+          select: count(distinct context_session_id)
+          where: context_session_id is not null
+          description: Total individual sessions created till date.
+      - entity_var:
+          name: max_timestamp_cart_update
+          select: max(timestamp)
+          from: inputs/rsMarketingAddedToCart
+          is_feature: false
+      - entity_var:
+          name: max_timestamp_tracks
+          select: max(timestamp)
+          from: inputs/rsMarketingTracks
+          is_feature: false
+      - entity_var:
+          name: max_timestamp_pages
+          select: max(timestamp)
+          from: inputs/rsMarketingPages
+          description: The total value of products that are part of the last transaction.
+          is_feature: false
+      - entity_var:
+          name: max_timestamp_bw_tracks_pages
+          select: CASE WHEN {{user.Var("max_timestamp_tracks")}}>={{user.Var("max_timestamp_pages")}} THEN {{user.Var("max_timestamp_tracks")}} ELSE {{user.Var("max_timestamp_pages")}} END
+          is_feature: false
+      - entity_var:
+          name: days_since_last_seen
+          select: "{{macro_datediff('{{user.Var(\"max_timestamp_bw_tracks_pages\")}}')}}"
+          description: Days since user last logged in
+      - entity_var:
+          name: is_churned_7_days
+          select: case when {{user.Var("days_since_last_seen")}} > 7 then 1 else 0 end
+          description: It specifies if there is any activity observed in the last n days. It is dependent on days_since_last_seen
+      - entity_var:
+          name: last_order_date
+          select: max(timestamp)
+          from: inputs/rsShopifyOrderCompleted
+          description: Last purchase date
+          is_feature: false
+      - entity_var:
+          name: days_since_last_purchase
+          select: "{{macro_datediff('{{user.Var(\"last_order_date\")}}')}}"
+          description: Number of days since the user purchased the latest product
+      - entity_var:
+          name: subscription_propensity
+          select: |
+            case
+                when {{user.Var("subscription_type")}} is null
+                and {{user.Var("device_count")}} > 0
+                then FLOOR((right(random(),2)/100) *(100-62+1))+62 end
+          description: Likelihood customer will apply for loan in next 7 days
+      - entity_var:
+          name: account_first_name
+          description: First name of the customer
+          select: first_value(first_name)
+          from: inputs/rsShopifyOrderCompleted
+          where: first_name is not null
+          window:
+            order_by:
+              - timestamp desc
+      - entity_var:
+          name: account_last_name
+          description: Last name of the customer
+          select: first_value(last_name)
+          from: inputs/rsShopifyOrderCompleted
+          where: last_name is not null
+          window:
+            order_by:
+              - timestamp desc
+      - entity_var:
+          name: user_email
+          description: Most recent Shopify email address used by the customer
+          select: first_value(email)
+          from: inputs/rsShopifyOrderCompleted
+          where: email is not null
+          window:
+            order_by:
+              - timestamp desc
+      - entity_var:
+          name: android_account_updates
+          description: Latest account details from Android app
+          select: last_value(object_construct('state', state, 'zipcode', zipcode, 'username' ,  username , 'ip_address' , context_request_ip))
+          from: inputs/rsAndroidAccountUpdated
+          where: username is not null
+          window:
+            order_by:
+              - timestamp desc
+      - entity_var:
+          name: ios_account_updates
+          description: Latest account details from Android app
+          select: last_value(object_construct('state', state, 'zipcode', zipcode, 'username' ,  username , 'ip_address' , context_request_ip))
+          from: inputs/rsIOSAccountUpdated
+          where: username is not null
+          window:
+            order_by:
+              - timestamp desc
+      - entity_var:
+          name: account_username
+          select: coalesce({{user.Var("android_account_updates")}}:username::text, {{user.Var("ios_account_updates")}}:username::text  )
+          description: username used in the app
+      - entity_var:
+          name: device_count
+          description: Total number of devices purchased
+          select: count(distinct device_id )
+          from: inputs/rsShopifyOrderCompleted
+      - entity_var:
+          name: device_count_with_active_subscriptions
+          description: Total number of renewed subscriptions in current month
+          select: count(distinct device_id )
+          from: inputs/rsSubServiceRenewal
+          where: datediff(Month, Current_Date, Invoice_Date::date) = 0
+      - entity_var:
+          name: subscription_type
+          description: Current subscription level
+          select: first_value(subscription_type)
+          from: inputs/rsSubServiceStart
+          where: subscription_type is not null
+          window:
+            order_by:
+              - INVOICE_DATE desc
+      - entity_var:
+          name: account_signup_date
+          select: min(timestamp::date)
+          from: inputs/rsMarketingIdentifies
+          description: Date account was created
+      - entity_var:
+          name: account_type
+          select: any_value(array_construct('Residential', 'Commercial')[ABS(MOD(Random(),2))]::text)
+          from: inputs/rsShopifyOrderCompleted
+          description: Type of Account (residential or commercial)
+      - entity_var:
+          name: install_type
+          select: any_value(array_construct('Self-Install', 'Pro-Install')[ABS(MOD(Random(),2))]::text)
+          from: inputs/rsShopifyOrderCompleted
+          description: Self or Pro (who installed the devices)
+      - entity_var:
+          name: live_view_count
+          select: count(event)
+          from: inputs/rsIOSLiveView
+      - entity_var:
+          name: subscription_change_count
+          select: count(subscription_type)
+          from: inputs/rsSubServiceUpgrade
+  - name: commercial_customer_vars
+    entity_cohort: models/commercial_customers
+    vars:
+      - entity_var:
+          name: customer_device_count
+          description: Total number of devices purchased
+          select: count(distinct device_id )
+          from: inputs/rsShopifyOrderCompleted
+      - entity_var:
+          name: customer_signup_date
+          select: min(timestamp::date)
+          from: inputs/rsMarketingIdentifies
+          description: Date account was created
+  - name: residential_customer_vars
+    entity_cohort: models/residential_customers
+    vars:
+      - entity_var:
+          name: customer_pet_count
+          description: Total number of devices purchased
+          select: count(distinct device_id )
+          from: inputs/rsShopifyOrderCompleted
+      - entity_var:
+          name: last_alert_date
+          select: min(timestamp::date)
+          from: inputs/rsMarketingIdentifies
+          description: Date account was created
